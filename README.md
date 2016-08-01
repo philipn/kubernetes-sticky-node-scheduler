@@ -44,6 +44,10 @@ to the template metdata.  For instance:
               image: stateful-service-image
 
 
+The scheduler identifies 'varients' of your pods basd on the
+`metadata.labels` entry in your pod template.
+
+
 License
 -------
 
