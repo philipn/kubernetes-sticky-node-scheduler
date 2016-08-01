@@ -1,0 +1,19 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: sticky-node-scheduler
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: sticky-node-scheduler
+    spec:
+      containers:
+        - name: sticky-node-scheduler
+          image: sticky:latest
+          imagePullPolicy: IfNotPresent
+  strategy:
+    # We only want one scheduler running at a time, or we will have
+    # race conditions.
+    type: Recreate
