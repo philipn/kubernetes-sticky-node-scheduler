@@ -11,7 +11,7 @@ spec:
     spec:
       containers:
         - name: sticky-node-scheduler
-          image: sticky:latest
+          image: shotwell/kubernetes-sticky-node-scheduler:latest
   strategy:
     # We only want one scheduler running at a time, or we will have
     # race conditions.
