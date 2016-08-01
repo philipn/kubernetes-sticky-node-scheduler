@@ -1,5 +1,5 @@
 `sticky-node-scheduler` is a custom [Kubernetes](http://kubernetes.io/)
-scheduler that schedules all variants a given pod on the same node.
+scheduler that schedules all variants of a given pod on the same node.
 
 If a pod variant isn't running on any nodes, we use the default Kubernetes
 scheduler to schedule the pod.  If any varients of a pod *are* running, then
