@@ -5,8 +5,9 @@ If a pod variant isn't running on any nodes, we use the default Kubernetes
 scheduler to schedule the pod.  If any varients of a pod *are* running, then
 we place copies of the pod on the same node.
 
-If you're using e.g. EBS volumes and need seamless updates of your stateful
-Deployments, this might be useful to you.
+If you're using e.g. EBS volumes, which can only be attached to a single node
+at a time, and need seamless updates of your stateful Deployments, this might
+be useful to you.
 
 NOTE: This is **not** ready for production usage.
 
