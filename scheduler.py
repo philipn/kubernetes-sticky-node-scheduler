@@ -1,4 +1,5 @@
 from urllib.parse import urljoin, quote
+from collections import defaultdict
 import json
 from copy import copy
 import logging
@@ -19,6 +20,8 @@ _log = logging.getLogger(__name__)
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+_pod_variant_default_scheduled = defaultdict(list)
 
 
 class ErrorSchedulingPod(Exception):
@@ -51,6 +54,50 @@ def escape_jsonpatch_value(value):
     return value.replace('/', '~1')
 
 
+def is_pod_dead(label_selector, pod_name):
+    label_selector = get_pod_selector(pod)
+    url = urljoin(API_URL, 'pods?labelSelector={}'.format(
+            quote(label_selector)))
+    r = k8_request('get', url)
+    pods_for_selector = r.json()
+
+    for pod in pods_for_selector.get('items', []):
+        if pod['metadata']['name'] != pod_name:
+            continue
+        status = pod.get('status', {}).get('phase')
+        if status.lower() == 'running' or status.lower() == 'pending':
+            return True
+        else:
+            return False
+
+    return True
+
+
+def record_as_default_scheduled(label_selector, pod):
+    pod_name = pod['metadata']['name']
+    _pod_variant_default_scheduled[label_selector].append(pod_name)
+
+
+def is_default_scheduled(label_selector, pod):
+    pod_name = pod['metadata']['name']
+
+    for pod_name in _pod_variant_default_scheduled[label_selector]:
+        if is_pod_dead(label_selector, pod_name):
+            _pod_variant_default_scheduled[label_selector].remove(pod_name)
+
+    # We want to clear out stopped / dead pods
+    if not _pod_variant_default_scheduled[label_selector]:
+        return False
+
+    return True
+
+
+def clear_default_scheduled(label_selector, pod):
+    pod_name = pod['metadata']['name']
+    if label_selector in _pod_variant_default_scheduled[label_selector]:
+        del _pod_variant_default_scheduled[label_selector]
+
+
 def get_pod_selector(pod):
     """
     Returns:
@@ -65,8 +112,8 @@ def get_pod_selector(pod):
         del labels['pod-template-hash']
 
     selector = []
-    for k, v in labels.items():
-        selector.append('{}={}'.format(k, v))
+    for k in sorted(labels.keys()):
+        selector.append('{}={}'.format(k, labels[k]))
     return ','.join(selector)
 
 
@@ -117,12 +164,16 @@ def set_default_scheduler_on_pod(pod):
             'There was an error setting the default scheduler on '
             'pod {}.'.format(pod_name))
 
+    record_as_default_scheduled(label_selector, pod)
+
 
 def bind_pod_to_node(pod, node_running_pod):
     pod_name = pod['metadata']['name']
     label_selector = get_pod_selector(pod)
     _log.info('Binding pod {} ({}) to node {}'.format(
         pod_name, label_selector, node_running_pod))
+
+    clear_default_scheduled(label_selector, pod)
 
     url = urljoin(API_URL, 'namespaces/{}/pods/{}/binding'.format(
         NAMESPACE, pod_name))
@@ -158,6 +209,12 @@ def process_unscheduled_pods(pods):
         if pod_scheduler_name == OUR_SCHEDULER_NAME:
             node_running_pod = get_node_running_pod(pod)
             if not node_running_pod:
+                if is_default_scheduled(label_selector, pod):
+                    # We wait for the default-scheduled pod to come online.
+                    # The default scheduler won't kick in instantly, so we
+                    # need to wait for it to schedule the previous pod variant.
+                    return
+
                 # If the pod isn't already running somewhere, then we tell the pod
                 # to instead use the default scheduler.
                 _log.info(
