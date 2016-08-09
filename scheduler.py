@@ -55,7 +55,6 @@ def escape_jsonpatch_value(value):
 
 
 def is_pod_dead(label_selector, pod_name):
-    label_selector = get_pod_selector(pod)
     url = urljoin(API_URL, 'pods?labelSelector={}'.format(
             quote(label_selector)))
     r = k8_request('get', url)
