@@ -1,13 +1,17 @@
 `sticky-node-scheduler` is a custom [Kubernetes](http://kubernetes.io/)
 scheduler that schedules all variants of a given pod on the same node.
 
-If a pod variant isn't running on any nodes, we use the default Kubernetes
-scheduler to schedule the pod.  If any varients of a pod *are* running, then
-we place copies of the pod on the same node.
+If a pod variant isn't running on any nodes, we pick a node to schedule on to
+based on which node is running the least amount of our sticky-scheduled pods.
+If any varients of a pod *are* running, then we place all copies of the pod
+on the same node.
 
 If you're using e.g. EBS volumes, which can only be attached to a single node
 at a time, and need seamless updates of your stateful Deployments, this might
 be useful to you.
+
+This scheduler only works with Kubernetes >= 1.6, which support custom
+schedulers as a beta feature.
 
 NOTE: This is **not** ready for production usage.
 
@@ -22,10 +26,9 @@ First, deploy the scheduler into your cluster:
 Then, for each Deployment or ReplicationController you want to schedule
 using this scheduler, add:
 
-    annotations:
-        scheduler.alpha.kubernetes.io/name: stickToExistingNodeScheduler
+    schedulerName: stickToExistingNodeScheduler
 
-to the template metdata.  For instance:
+to the pod spec.  For instance:
 
     apiVersion: extensions/v1beta1
     kind: Deployment
@@ -37,9 +40,8 @@ to the template metdata.  For instance:
         metadata:
           labels:
             app: my-stateful-service
-          annotations:
-            scheduler.alpha.kubernetes.io/name: stickToExistingNodeScheduler
         spec:
+          schedulerName: stickToExistingNodeScheduler
           containers:
             - name: my-stateful-service
               image: stateful-service-image
@@ -49,10 +51,19 @@ The scheduler identifies 'variants' of your pods based on the
 `metadata.labels` entry in your pod template.
 
 
+Options
+-------
+
+The `NODE_FILTER_QUERY` environment variable controls which nodes are
+selected for scheduling.  By default, it is set to
+`labelSelector=kubernetes.io/role=node`, which will filter only nodes (e.g.
+we won't schedule on to your master nodes).
+
+
 License
 -------
 
-Copyright (c) 2016 Shotwell Labs, Inc.
+Copyright (c) 2016, 2017 Shotwell Labs, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in

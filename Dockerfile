@@ -7,4 +7,6 @@ COPY requirements.txt .
 COPY scheduler.py .
 RUN pip3 install -r requirements.txt
 
+ENV NODE_FILTER_QUERY labelSelector=kubernetes.io/role=node
+
 CMD ["python3", "scheduler.py"]

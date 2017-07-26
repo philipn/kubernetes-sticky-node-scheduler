@@ -1,7 +1,8 @@
+import os
 from urllib.parse import urljoin, quote
 from collections import defaultdict
 import json
-from copy import copy
+from copy import copy, deepcopy
 import logging
 
 import requests
@@ -18,13 +19,28 @@ CA_BUNDLE_LOCATION = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
+NODE_FILTER_QUERY = os.environ.get('NODE_FILTER_QUERY', '')
+
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-_pod_variant_default_scheduled = defaultdict(list)
+_nodes_scheduled_to = {}
+_nodes_to_skip = defaultdict(list)
 
 
 class ErrorSchedulingPod(Exception):
+    pass
+
+
+class ErrorDeletingPod(Exception):
+    pass
+
+
+class ErrorCreatingPod(Exception):
+    pass
+
+
+class NoValidNodesToScheduleTo(Exception):
     pass
 
 
@@ -50,11 +66,18 @@ def get_unscheduled_pods():
     return pending_pods_info.get('items', [])
 
 
+def get_failed_pods():
+    failed_pods = urljoin(API_URL, 'pods?fieldSelector=status.phase=Failed')
+    r = k8_request('get', failed_pods)
+    pending_pods_info = r.json()
+    return pending_pods_info.get('items', [])
+
+
 def escape_jsonpatch_value(value):
     return value.replace('/', '~1')
 
 
-def is_pod_dead(label_selector, pod_name):
+def _is_pod_running_or_pending(label_selector, pod_name):
     url = urljoin(API_URL, 'pods?labelSelector={}'.format(
             quote(label_selector)))
     r = k8_request('get', url)
@@ -70,31 +93,6 @@ def is_pod_dead(label_selector, pod_name):
             return False
 
     return True
-
-
-def record_as_default_scheduled(label_selector, pod):
-    pod_name = pod['metadata']['name']
-    _pod_variant_default_scheduled[label_selector].append(pod_name)
-
-
-def is_default_scheduled(label_selector, pod):
-    pod_name = pod['metadata']['name']
-
-    for pod_name in _pod_variant_default_scheduled[label_selector]:
-        if is_pod_dead(label_selector, pod_name):
-            _pod_variant_default_scheduled[label_selector].remove(pod_name)
-
-    # We want to clear out stopped / dead pods
-    if not _pod_variant_default_scheduled[label_selector]:
-        return False
-
-    return True
-
-
-def clear_default_scheduled(label_selector, pod):
-    pod_name = pod['metadata']['name']
-    if label_selector in _pod_variant_default_scheduled[label_selector]:
-        del _pod_variant_default_scheduled[label_selector]
 
 
 def get_pod_selector(pod):
@@ -114,6 +112,19 @@ def get_pod_selector(pod):
     for k in sorted(labels.keys()):
         selector.append('{}={}'.format(k, labels[k]))
     return ','.join(selector)
+
+
+def get_nodes():
+    """
+    Returns:
+        A list of node name strings.
+    """
+    url = urljoin(API_URL, 'nodes?{}'.format(NODE_FILTER_QUERY))
+    r = k8_request('get', url)
+    result = r.json()
+    nodes = result['items']
+
+    return [n['metadata']['name'] for n in nodes]
 
 
 def get_node_running_pod(pod):
@@ -138,32 +149,86 @@ def get_node_running_pod(pod):
     return nodes.pop() if nodes else None
 
 
+def create_pod_definition(pod):
+    """
+    Args:
+        pod: A dictionary describing a pod.
+
+    Returns:
+        A pod definiton suitable for a create request from the API.
+    """
+    pod = deepcopy(pod)
+
+    # Remove elements that are not needed in the pod creation
+    # definition, or elements that aren't allowed in the pod
+    # creation definition.
+    pod.pop('status', None)
+    if 'annotations' in pod['metadata']:
+        pod['metadata']['annotations'].pop('kubernetes.io/created-by', None)
+    #pod['metadata'].pop('name', None)
+    #pod['metadata'].pop('generateName', None)
+    pod['metadata'].pop('creationTimestamp', None)
+    pod['metadata'].pop('generateTime', None)
+    #pod['metadata'].pop('ownerReferences', None)
+    pod['metadata'].pop('resourceVersion', None)
+    pod['metadata'].pop('selfLink', None)
+    pod['metadata'].pop('uid', None)
+
+    return pod
+
+
 def set_default_scheduler_on_pod(pod):
+    # It's currently not possible to change the scheduler on an existing
+    # pod -- see https://github.com/kubernetes/kubernetes/issues/24913
+    # Because of this, we delete the pod and re-create it with the default
+    # scheduler set.
+    label_selector = get_pod_selector(pod)
+
+    # We first create the new pod, because otherwise a RC/Deployment
+    # may re-create the deleted pod before we can create it.
+    new_pod = create_pod_definition(pod)
+    del new_pod['spec']['schedulerName']
+    new_pod['metadata']['name'] += '-rescheduled'
+    create_pod(new_pod)
+    record_as_default_scheduled(label_selector, new_pod)
+    delete_pod(pod)
+
+
+def create_pod(pod):
     pod_name = pod['metadata']['name']
     label_selector = get_pod_selector(pod)
-    _log.info('Setting default scheduler on pod {} ({})'.format(
+    _log.info('Creating pod {} ({})'.format(
         pod_name, label_selector))
 
-    url = urljoin(API_URL, 'namespaces/{}/pods/{}'.format(NAMESPACE, pod_name))
-    headers = {
-        'Content-Type': 'application/json-patch+json',
-        'Accept': 'application/json',
+    url = urljoin(API_URL, 'namespaces/{}/pods'.format(
+        NAMESPACE))
+
+    r = k8_request('post', url, json=pod)
+    if r.status_code != 201:
+        raise ErrorCreatingPod(
+            'There was an error creating pod {}.'.format(
+                pod_name))
+
+
+def delete_pod(pod):
+    pod_name = pod['metadata']['name']
+    label_selector = get_pod_selector(pod)
+    _log.info('Deleting pod {} ({})'.format(
+        pod_name, label_selector))
+
+    url = urljoin(API_URL, 'namespaces/{}/pods/{}'.format(
+        NAMESPACE, pod_name))
+
+    payload = {
+        'apiVersion': 'v1',
+        'gracePeriodSeconds': 0,
     }
-    scheduler_key = escape_jsonpatch_value('scheduler.alpha.kubernetes.io/name')
-    payload = [{
-        'op': 'replace',
-        'path': '/metadata/annotations/{}'.format(scheduler_key),
-        'value': DEFAULT_KUBERNETES_SCHEDULER
-    }]
 
-    r = k8_request('patch', url, data=json.dumps(payload), headers=headers)
-
+    r = k8_request('delete', url, json=payload)
     if r.status_code != 200:
-        raise ErrorSchedulingPod(
-            'There was an error setting the default scheduler on '
-            'pod {}.'.format(pod_name))
-
-    record_as_default_scheduled(label_selector, pod)
+        raise ErrorDeletingPod(
+            'There was an error deleting pod {}.'.format(
+                pod_name))
 
 
 def bind_pod_to_node(pod, node_running_pod):
@@ -171,8 +236,6 @@ def bind_pod_to_node(pod, node_running_pod):
     label_selector = get_pod_selector(pod)
     _log.info('Binding pod {} ({}) to node {}'.format(
         pod_name, label_selector, node_running_pod))
-
-    clear_default_scheduled(label_selector, pod)
 
     url = urljoin(API_URL, 'namespaces/{}/pods/{}/binding'.format(
         NAMESPACE, pod_name))
@@ -197,40 +260,120 @@ def bind_pod_to_node(pod, node_running_pod):
                 pod_name, node_running_pod))
 
 
+def pick_node_to_schedule_to(pod):
+    label_selector = get_pod_selector(pod)
+    nodes = get_nodes()
+
+    # Remove nodes that are now gone
+    old_nodes = set([n for n in _nodes_scheduled_to])
+    new_nodes = set(nodes)
+
+    for node in (new_nodes - old_nodes):
+        # Add new nodes
+        _nodes_scheduled_to[node] = []
+
+    for node in (old_nodes - new_nodes):
+        # Delete nodes that are gone
+        del _nodes_scheduled_to[node]
+
+    nodes_to_skip = _nodes_to_skip[label_selector]
+
+    # Pick a node with the smallest number of our pods
+    # scheduled to it.
+    nodes = copy(_nodes_scheduled_to)
+    for node in nodes_to_skip:
+        if node in nodes:
+            del nodes[node]
+    nodes = list(nodes.items())
+    nodes.sort(key=lambda x: len(_nodes_scheduled_to[x[0]]))
+
+    if not nodes:
+        raise NoValidNodesToScheduleTo('No more valid nodes to schedule to.')
+
+    return nodes[0][0]
+
+
+def mark_pod_as_scheduled(pod, node_name):
+    label_selector = get_pod_selector(pod)
+    _nodes_scheduled_to[node_name].append(label_selector)
+
+
+def unmark_pod_as_scheduled(pod, node_name):
+    label_selector = get_pod_selector(pod)
+    _nodes_scheduled_to[node_name].remove(label_selector)
+
+
 def process_unscheduled_pods(pods):
     for pod in pods:
-        metadata = pod.get('metadata', {})
-        annotations = metadata.get('annotations', {})
-        pod_scheduler_name = annotations.get('scheduler.alpha.kubernetes.io/name')
+        spec = pod.get('spec', {})
+        pod_scheduler_name = spec.get('schedulerName')
         label_selector = get_pod_selector(pod)
 
         # We only schedule unschedule pods that are set to use this scheduler.
         if pod_scheduler_name == OUR_SCHEDULER_NAME:
             node_running_pod = get_node_running_pod(pod)
-            if not node_running_pod:
-                if is_default_scheduled(label_selector, pod):
-                    # We wait for the default-scheduled pod to come online.
-                    # The default scheduler won't kick in instantly, so we
-                    # need to wait for it to schedule the previous pod variant.
+
+            if node_running_pod:
+                node_to_schedule_to = node_running_pod
+            else:
+                # If the pod isn't already running somewhere, then we pick a
+                # node to schedule the pod to.
+                try:
+                    node_to_schedule_to = pick_node_to_schedule_to(pod)
+                    mark_pod_as_scheduled(pod, node_to_schedule_to)
+                except NoValidNodesToScheduleTo:
+                    # We will re-try the scheduling again in the parent loop,
+                    # but for now we skip it.
+                    _log.info(
+                        'Skipping scheduling pod of form {} for now.'.format(
+                            label_selector))
                     return
 
-                # If the pod isn't already running somewhere, then we tell the pod
-                # to instead use the default scheduler.
                 _log.info(
-                    'No node currently running pod of form {}. Handing off to '
-                    'the default scheduler.'.format(label_selector))
-                set_default_scheduler_on_pod(pod)
-                # After handing off to the default scheduler, we need to
-                # regenerate the list of unscheduled posts, so we return here.
-                return
+                    'No node currently running pod of form {}. Scheduling it to '
+                    'node {}'.format(label_selector, node_to_schedule_to))
 
-            bind_pod_to_node(pod, node_running_pod)
+            try:
+                bind_pod_to_node(pod, node_to_schedule_to)
+            except ErrorSchedulingPod:
+                if not node_running_pod:
+                    # We want to now taint the node we attempted to schedule
+                    # on to, so that we will rotate over to a new node
+                    # when we try and schedule again.
+                    _nodes_to_skip[label_selector].append(node_to_schedule_to)
+            else:
+                # Because we were able to schedule the pod, let's clear out the
+                # nodes to skip on this label selector.  This will allow us to
+                # try nodes that may now be schedulable next time we.
+                if not node_running_pod:
+                    if _nodes_to_skip[label_selector]:
+                        del _nodes_to_skip[label_selector]
+
+
+def process_failed_pods(pods):
+    for pod in pods:
+        spec = pod.get('spec', {})
+        pod_scheduler_name = spec.get('schedulerName')
+        label_selector = get_pod_selector(pod)
+
+        # We only deal with pods that are set to use this scheduler.
+        if pod_scheduler_name != OUR_SCHEDULER_NAME:
+            continue
+
+        # Delete the failed pod.  Hopefully it's wired up to a replication
+        # controller that will re-spawn it or something.
+        delete_pod(pod)
+
+        node_name = pod.get('spec', {}).get('nodeName')
+        unmark_pod_as_scheduled(pod, node_name)
 
 
 def run_loop():
     while True:
         unscheduled_pods = get_unscheduled_pods()
         process_unscheduled_pods(unscheduled_pods)
+        failed_pods = get_failed_pods()
+        process_failed_pods(failed_pods)
 
 
 if __name__ == '__main__':
