@@ -24,7 +24,7 @@ NODE_FILTER_QUERY = os.environ.get('NODE_FILTER_QUERY', '')
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-_nodes_scheduled_to = {}
+_nodes_scheduled_to = defaultdict(list)
 _nodes_to_skip = defaultdict(list)
 
 
@@ -300,7 +300,8 @@ def mark_pod_as_scheduled(pod, node_name):
 
 def unmark_pod_as_scheduled(pod, node_name):
     label_selector = get_pod_selector(pod)
-    _nodes_scheduled_to[node_name].remove(label_selector)
+    if label_selector in _nodes_scheduled_to[node_name]:
+        _nodes_scheduled_to[node_name].remove(label_selector)
 
 
 def process_unscheduled_pods(pods):
@@ -309,7 +310,7 @@ def process_unscheduled_pods(pods):
         pod_scheduler_name = spec.get('schedulerName')
         label_selector = get_pod_selector(pod)
 
-        # We only schedule unschedule pods that are set to use this scheduler.
+        # We only schedule pods that are set to use this scheduler.
         if pod_scheduler_name == OUR_SCHEDULER_NAME:
             node_running_pod = get_node_running_pod(pod)
 
@@ -320,13 +321,18 @@ def process_unscheduled_pods(pods):
                 # node to schedule the pod to.
                 try:
                     node_to_schedule_to = pick_node_to_schedule_to(pod)
-                    mark_pod_as_scheduled(pod, node_to_schedule_to)
                 except NoValidNodesToScheduleTo:
                     # We will re-try the scheduling again in the parent loop,
                     # but for now we skip it.
                     _log.info(
                         'Skipping scheduling pod of form {} for now.'.format(
                             label_selector))
+                    # We clear out the tainted nodes to avoid the scheduler
+                    # getting stuck -- we want to re-try previously
+                    # failed nodes, now.
+                    if label_selector in _nodes_to_skip:
+                        del _nodes_to_skip[label_selector]
+
                     return
 
                 _log.info(
@@ -342,6 +348,7 @@ def process_unscheduled_pods(pods):
                     # when we try and schedule again.
                     _nodes_to_skip[label_selector].append(node_to_schedule_to)
             else:
+                mark_pod_as_scheduled(pod, node_to_schedule_to)
                 # Because we were able to schedule the pod, let's clear out the
                 # nodes to skip on this label selector.  This will allow us to
                 # try nodes that may now be schedulable next time we.
@@ -359,6 +366,11 @@ def process_failed_pods(pods):
         # We only deal with pods that are set to use this scheduler.
         if pod_scheduler_name != OUR_SCHEDULER_NAME:
             continue
+
+        status = pod.get('status')
+        _log.error(
+            'Pod of type {} failed. Deleting pod and hoping it will '
+            're-spawn correctly. Full pod status:\n{}'.format(label_selector, status))
 
         # Delete the failed pod.  Hopefully it's wired up to a replication
         # controller that will re-spawn it or something.
