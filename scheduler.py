@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
 NODE_FILTER_QUERY = os.environ.get('NODE_FILTER_QUERY', '')
+SUPPORT_MINIKUBE = int(os.environ.get('SUPPORT_MINIKUBE', '1'))
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -124,7 +125,17 @@ def get_nodes():
     result = r.json()
     nodes = result['items']
 
-    return [n['metadata']['name'] for n in nodes]
+    nodes = set([n['metadata']['name'] for n in nodes])
+
+    # Support for minikube, which doesn't have the usual
+    # 'kubernetes.io/role=node' label
+    if SUPPORT_MINIKUBE:
+        url = urljoin(API_URL, 'nodes?labelSelector=kubernetes.io/hostname=minikube')
+        r = k8_request('get', url)
+        result = r.json()
+        nodes = nodes.union(set([n['metadata']['name'] for n in result['items']]))
+
+    return nodes
 
 
 def get_node_running_pod(pod):
