@@ -2,6 +2,7 @@ import os
 from urllib.parse import urljoin, quote
 from collections import defaultdict
 import json
+import random
 from copy import copy, deepcopy
 import logging
 
@@ -394,6 +395,10 @@ def process_failed_pods(pods):
 def run_loop():
     while True:
         unscheduled_pods = get_unscheduled_pods()
+        # Return in random order to prevent infinite scheduling loops
+        # when pods fail to schedule.
+        random.shuffle(unscheduled_pods)
+
         process_unscheduled_pods(unscheduled_pods)
         failed_pods = get_failed_pods()
         process_failed_pods(failed_pods)
