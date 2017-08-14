@@ -1,4 +1,5 @@
 import os
+import time
 from urllib.parse import urljoin, quote
 from collections import defaultdict
 import json
@@ -22,6 +23,7 @@ _log = logging.getLogger(__name__)
 
 NODE_FILTER_QUERY = os.environ.get('NODE_FILTER_QUERY', '')
 SUPPORT_MINIKUBE = int(os.environ.get('SUPPORT_MINIKUBE', '1'))
+POLL_FREQUENCY = float(os.environ.get('POLL_FREQUENCY', '1'))
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -394,6 +396,8 @@ def process_failed_pods(pods):
 
 def run_loop():
     while True:
+        time.sleep(POLL_FREQUENCY)
+
         unscheduled_pods = get_unscheduled_pods()
         # Return in random order to prevent infinite scheduling loops
         # when pods fail to schedule.

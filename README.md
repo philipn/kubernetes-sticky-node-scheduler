@@ -59,6 +59,9 @@ selected for scheduling.  By default, it is set to
 `labelSelector=kubernetes.io/role=node`, which will filter only nodes (e.g.
 we won't schedule on to your master nodes).
 
+The `POLL_FREQUENCY` environment variable controls how often we poll the
+Kubernetes API for changes.  The default is 1 time per second.
+
 
 License
 -------
