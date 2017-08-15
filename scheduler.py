@@ -23,7 +23,7 @@ _log = logging.getLogger(__name__)
 
 NODE_FILTER_QUERY = os.environ.get('NODE_FILTER_QUERY', '')
 SUPPORT_MINIKUBE = int(os.environ.get('SUPPORT_MINIKUBE', '1'))
-POLL_FREQUENCY = float(os.environ.get('POLL_FREQUENCY', '1'))
+POLL_FREQUENCY = float(os.environ.get('POLL_FREQUENCY', '0.5'))
 
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)

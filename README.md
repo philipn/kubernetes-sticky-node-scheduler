@@ -60,7 +60,7 @@ selected for scheduling.  By default, it is set to
 we won't schedule on to your master nodes).
 
 The `POLL_FREQUENCY` environment variable controls how often we poll the
-Kubernetes API for changes.  The default is 1 time per second.
+Kubernetes API for changes, per second.  The default is `0.5`.
 
 
 License
